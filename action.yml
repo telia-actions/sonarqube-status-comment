@@ -1,0 +1,119 @@
+name: 'SonarQube Quality Gate status as a comment in PR'
+description: 'Get SonarQube Quality Gate status and write it as a comment in a Pull Request'
+permissions:
+  checks: write
+inputs:
+  SONAR_TOKEN:
+    description: 'SonarQube token'
+    required: true
+  SONAR_HOST_URL:
+    description: 'SonarQube host URL'
+    required: true
+  SONAR_PROJECT_KEY:
+    description: 'SonarQube project key'
+    required: true
+  GITHUB_EVENT_NUMBER:
+    description: 'GitHub Pull Request number'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+  
+    - name: Check if event is a pull request
+      id: check_pr
+      run: |
+        if [ "${{ github.event_name }}" != "pull_request" ]; then
+          echo "This action only runs for pull requests."
+          exit 1
+        fi
+      shell: bash
+
+    - name: Get SonarQube Quality Gate status for Pull Request
+      env:
+        SONAR_TOKEN: ${{ inputs.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ inputs.SONAR_HOST_URL }}
+        SONAR_PROJECT_KEY: ${{ inputs.SONAR_PROJECT_KEY }}
+        GITHUB_EVENT_NUMBER: ${{ inputs.GITHUB_EVENT_NUMBER }}
+      run: |
+        # sleep a while to allow SonarQube to process the analysis as otherwise an outdated gate status may be returned
+        sleep 30
+        curl -s -o response.json -w "%{http_code}" -u ${SONAR_TOKEN}: ${SONAR_HOST_URL}/api/qualitygates/project_status\?projectKey=${SONAR_PROJECT_KEY}\&pullRequest=${GITHUB_EVENT_NUMBER} > status.txt
+        exit_code=$?
+        http_status=$(cat status.txt)
+        echo "CURL exit code: $exit_code"
+        echo "HTTP status code from Sonarqube server: $http_status"
+        echo "Response body from SonarQube API:"
+        cat response.json
+        gate_status=$(jq -r '.projectStatus.status' response.json)
+        jq -r '.projectStatus.conditions[] | "\(.status) \(.metricKey) \(.errorThreshold) \(.comparator) \(.actualValue)"' response.json >metrics.txt
+        echo "gate_status=$gate_status" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Prepare comment for a Pull Request
+      env:
+        SONAR_TOKEN: ${{ inputs.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ inputs.SONAR_HOST_URL }}
+        SONAR_PROJECT_KEY: ${{ inputs.SONAR_PROJECT_KEY }}
+        GITHUB_EVENT_NUMBER: ${{ inputs.GITHUB_EVENT_NUMBER }}
+      run: |
+        echo "### SonarQube Static Code Analysis ###" > comment_body.txt
+        if [ "$gate_status" == "OK" ]; then
+          echo "✅ Quality Gate Status: Passed" >> comment_body.txt
+        else
+          echo "❌ Quality Gate Status: Failed" >> comment_body.txt
+        fi
+        echo "" >> comment_body.txt
+        echo "##### Quality Gate Conditions ####" >> comment_body.txt
+        echo "" >> comment_body.txt
+        echo "| Status | Metric Key | Threshold | Comparator | Actual Value |" >> comment_body.txt
+        echo "|--------|------------|-----------|------------|--------------|" >> comment_body.txt
+        cat metrics.txt | while IFS= read -r line; do
+          echo "| ${line// / | } |" >> comment_body.txt
+        done
+        echo "" >> comment_body.txt
+        echo "Link to the [analysis report](${SONAR_HOST_URL}/dashboard?id=${SONAR_PROJECT_KEY}&pullRequest=${GITHUB_EVENT_NUMBER})" >> comment_body.txt
+      shell: bash   
+
+    - name: Find PR comment
+      uses: telia-actions/find-comment@v2.2.0
+      id: fc
+      with:
+        issue-number: ${{ inputs.GITHUB_EVENT_NUMBER }}
+        comment-author: 'github-actions[bot]'
+        body-includes: Static Code Analysis
+
+    - name: Create or update PR comment
+      uses: telia-actions/create-or-update-comment@v4.0.0
+      with:
+        comment-id: ${{ steps.fc.outputs.comment-id }}
+        issue-number: ${{ inputs.GITHUB_EVENT_NUMBER }}
+        body-path: ./comment_body.txt
+        edit-mode: replace
+
+    - name: Output Sonarqube comment for debugging
+      run: |
+        echo "SonarQube comment body:"
+        cat comment_body.txt
+      shell: bash
+
+    - name: Annotate code in PR with SonarQube issue findings
+      env:
+        SONAR_TOKEN: ${{ inputs.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ inputs.SONAR_HOST_URL }}
+        SONAR_PROJECT_KEY: ${{ inputs.SONAR_PROJECT_KEY }}
+        GITHUB_EVENT_NUMBER: ${{ inputs.GITHUB_EVENT_NUMBER }}
+      run: |
+        curl -s -u ${SONAR_TOKEN}: ${SONAR_HOST_URL}/api/issues/search\?componentKeys=${SONAR_PROJECT_KEY}\&statuses=OPEN,REOPENED\&pullRequest=${GITHUB_EVENT_NUMBER} |jq >issues.json
+        jq -c '.issues[]' issues.json | while read -r issue; do
+          file=$(echo "$issue" | jq -r '.component'| cut -d':' -f2)
+          line=$(echo "$issue" | jq -r '.line')
+          message=$(echo "$issue" | jq -r '.message')
+          severity=$(echo "$issue" | jq -r '.severity')
+
+          if [ "$severity" = "BLOCKER" ] || [ "$severity" = "CRITICAL" ]; then
+            echo "::error file=${file},line=${line},col=${column}::$message"
+          else
+          	echo "::warning file=${file},line=${line},col=${column}::$message"
+          fi
+        done
+      shell: bash
