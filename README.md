@@ -1,6 +1,3 @@
-# sonarqube-status-comment
-Get SonarQube Quality Gate status and write it as a comment in a Pull Request.
-
 # SonarQube Quality Gate Status Comment Action
 
 This GitHub composite action retrieves the SonarQube Quality Gate status for a pull request and posts it as a comment. It also annotates the PR with issue findings from SonarQube.
@@ -24,7 +21,8 @@ jobs:
         uses: actions/checkout@v3
 
       - name: SonarQube Quality Gate status comment
-        uses: telia-actions/sonarqube-pr-comment@v1
+        uses: telia-actions/sonarqube-status-comment@v1
+        if: ${{ !cancelled() && (github.event_name == 'pull_request') }}
         with:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
